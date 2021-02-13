@@ -36,6 +36,7 @@ var allowedKinds = []types.Type{
 	types.Typ[types.Int64],
 	types.Typ[types.Bool],
 	types.Typ[types.String],
+	types.NewMap(types.Typ[types.String], types.Typ[types.String]),
 }
 
 type SliceOrArray interface {
@@ -51,7 +52,7 @@ func capitalize(s string) string {
 }
 
 func buildFieldForSlice(ctx context.Context, t SliceOrArray, name, goName, usage, defaultValue string, bindDefaultVar bool) (FieldInfo, error) {
-	strategy := SliceRaw
+	strategy := Raw
 	FlagMethodName := "StringSlice"
 	typ := types.NewSlice(types.Typ[types.String])
 	emptyDefaultValue := `[]string{}`
@@ -86,6 +87,50 @@ func buildFieldForSlice(ctx context.Context, t SliceOrArray, name, goName, usage
 		TestValue:         testValue,
 		TestStrategy:      strategy,
 		ShouldBindDefault: bindDefaultVar,
+	}, nil
+}
+
+func buildFieldForMap(ctx context.Context, t *types.Map, name, goName, usage, defaultValue string, bindDefaultVar bool) (FieldInfo, error) {
+	strategy := Raw
+	FlagMethodName := "StringToString"
+	typ := types.NewMap(types.Typ[types.String], types.Typ[types.String])
+	emptyDefaultValue := `nil`
+	if k, ok := t.Key().(*types.Basic); !ok || k.Kind() != types.String {
+		logger.Infof(ctx, "Key of type [%v] is not a basic type. It must be json unmarshalable or generation will fail.", t.Elem())
+	} else if v, valueOk := t.Elem().(*types.Basic); !valueOk && !isJSONUnmarshaler(t.Elem()) {
+		return FieldInfo{},
+			fmt.Errorf("map of type [%v] is not supported. Only basic slices or slices of json-unmarshalable types are supported",
+				t.Elem().String())
+	} else {
+		logger.Infof(ctx, "Map[%v]%v is supported. using pflag maps.", k, t.Elem())
+		strategy = Raw
+		if valueOk {
+			FlagMethodName = fmt.Sprintf("StringTo%v", capitalize(v.Name()))
+			typ = types.NewMap(k, v)
+			emptyDefaultValue = fmt.Sprintf(`map[%v]%v{}`, k.Name(), v.Name())
+		} else {
+			// Value is not a basic type. Rely on json marshaling to unmarshal it
+			FlagMethodName = fmt.Sprintf("StringToString")
+		}
+	}
+
+	if len(defaultValue) == 0 {
+		defaultValue = emptyDefaultValue
+	}
+
+	testValue := `"a=1,b=2"`
+
+	return FieldInfo{
+		Name:              name,
+		GoName:            goName,
+		Typ:               typ,
+		FlagMethodName:    FlagMethodName,
+		DefaultValue:      defaultValue,
+		UsageString:       usage,
+		TestValue:         testValue,
+		TestStrategy:      strategy,
+		ShouldBindDefault: bindDefaultVar,
+		ShouldTestDefault: false,
 	}, nil
 }
 
@@ -214,10 +259,14 @@ func discoverFieldsRecursive(ctx context.Context, typ *types.Named, defaultValue
 				defaultValue = appendAccessors(defaultValueAccessor, fieldPath, v.Name())
 				if isStringer(t) {
 					defaultValue = defaultValue + ".String()"
-				} else {
+				} else if isJSONMarshaler(t) {
 					logger.Infof(ctx, "Field [%v] of type [%v] does not implement Stringer interface."+
 						" Will use %s.mustMarshalJSON() to get its default value.", defaultValueAccessor, v.Name(), t.String())
 					defaultValue = fmt.Sprintf("%s.mustMarshalJSON(%s)", defaultValueAccessor, defaultValue)
+				} else {
+					logger.Infof(ctx, "Field [%v] of type [%v] does not implement Stringer interface."+
+						" Will use %s.mustMarshalJSON() to get its default value.", defaultValueAccessor, v.Name(), t.String())
+					defaultValue = fmt.Sprintf("%s.mustJsonMarshal(%s)", defaultValueAccessor, defaultValue)
 				}
 			}
 
@@ -266,17 +315,32 @@ func discoverFieldsRecursive(ctx context.Context, typ *types.Named, defaultValue
 			}
 		case *types.Slice:
 			logger.Infof(ctx, "[%v] is of a slice type with default value [%v].", tag.Name, tag.DefaultValue)
+			defaultValue := tag.DefaultValue
 
-			f, err := buildFieldForSlice(logger.WithIndent(ctx, indent), t, tag.Name, v.Name(), tag.Usage, tag.DefaultValue, bindDefaultVar)
+			f, err := buildFieldForSlice(logger.WithIndent(ctx, indent), t, tag.Name, v.Name(), tag.Usage, defaultValue, bindDefaultVar)
 			if err != nil {
 				return nil, err
 			}
 
 			fields = append(fields, f)
 		case *types.Array:
-			logger.Infof(ctx, "[%v] is of an array with default value [%v].", tag.Name, tag.DefaultValue)
+			logger.Infof(ctx, "[%v] is of an array type with default value [%v].", tag.Name, tag.DefaultValue)
+			defaultValue := tag.DefaultValue
 
-			f, err := buildFieldForSlice(logger.WithIndent(ctx, indent), t, tag.Name, v.Name(), tag.Usage, tag.DefaultValue, bindDefaultVar)
+			f, err := buildFieldForSlice(logger.WithIndent(ctx, indent), t, tag.Name, v.Name(), tag.Usage, defaultValue, bindDefaultVar)
+			if err != nil {
+				return nil, err
+			}
+
+			fields = append(fields, f)
+		case *types.Map:
+			logger.Infof(ctx, "[%v] is of a map type with default value [%v].", tag.Name, tag.DefaultValue)
+			defaultValue := tag.DefaultValue
+			if len(defaultValueAccessor) > 0 {
+				defaultValue = appendAccessors(defaultValueAccessor, fieldPath, v.Name())
+			}
+
+			f, err := buildFieldForMap(logger.WithIndent(ctx, indent), t, tag.Name, v.Name(), tag.Usage, defaultValue, bindDefaultVar)
 			if err != nil {
 				return nil, err
 			}

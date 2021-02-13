@@ -11,7 +11,7 @@ type TestStrategy string
 const (
 	JSON        TestStrategy = "Json"
 	SliceJoined TestStrategy = "SliceJoined"
-	SliceRaw    TestStrategy = "SliceRaw"
+	Raw         TestStrategy = "Raw"
 )
 
 type FieldInfo struct {
@@ -24,6 +24,7 @@ type FieldInfo struct {
 	TestValue         string
 	TestStrategy      TestStrategy
 	ShouldBindDefault bool
+	ShouldTestDefault bool
 }
 
 // Holds the finalized information passed to the template for evaluation.
