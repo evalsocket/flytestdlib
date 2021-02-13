@@ -20,9 +20,10 @@ const (
 
 // PFlagProviderGenerator parses and generates GetPFlagSet implementation to add PFlags for a given struct's fields.
 type PFlagProviderGenerator struct {
-	pkg        *types.Package
-	st         *types.Named
-	defaultVar *types.Var
+	pkg                  *types.Package
+	st                   *types.Named
+	defaultVar           *types.Var
+	shouldBindDefaultVar bool
 }
 
 // This list is restricted because that's the only kinds viper parses out, otherwise it assumes strings.
@@ -49,7 +50,7 @@ func capitalize(s string) string {
 	return s
 }
 
-func buildFieldForSlice(ctx context.Context, t SliceOrArray, name, goName, usage, defaultValue string) (FieldInfo, error) {
+func buildFieldForSlice(ctx context.Context, t SliceOrArray, name, goName, usage, defaultValue string, bindDefaultVar bool) (FieldInfo, error) {
 	strategy := SliceRaw
 	FlagMethodName := "StringSlice"
 	typ := types.NewSlice(types.Typ[types.String])
@@ -76,14 +77,15 @@ func buildFieldForSlice(ctx context.Context, t SliceOrArray, name, goName, usage
 	}
 
 	return FieldInfo{
-		Name:           name,
-		GoName:         goName,
-		Typ:            typ,
-		FlagMethodName: FlagMethodName,
-		DefaultValue:   defaultValue,
-		UsageString:    usage,
-		TestValue:      testValue,
-		TestStrategy:   strategy,
+		Name:              name,
+		GoName:            goName,
+		Typ:               typ,
+		FlagMethodName:    FlagMethodName,
+		DefaultValue:      defaultValue,
+		UsageString:       usage,
+		TestValue:         testValue,
+		TestStrategy:      strategy,
+		ShouldBindDefault: bindDefaultVar,
 	}, nil
 }
 
@@ -121,7 +123,7 @@ func appendAccessors(accessors ...string) string {
 // met; encountered a basic type (e.g. string, int... etc.) or the field type implements UnmarshalJSON.
 // If passed a non-empty defaultValueAccessor, it'll be used to fill in default values instead of any default value
 // specified in pflag tag.
-func discoverFieldsRecursive(ctx context.Context, typ *types.Named, defaultValueAccessor, fieldPath string) ([]FieldInfo, error) {
+func discoverFieldsRecursive(ctx context.Context, typ *types.Named, defaultValueAccessor, fieldPath string, bindDefaultVar bool) ([]FieldInfo, error) {
 	logger.Printf(ctx, "Finding all fields in [%v.%v.%v]",
 		typ.Obj().Pkg().Path(), typ.Obj().Pkg().Name(), typ.Obj().Name())
 
@@ -187,14 +189,15 @@ func discoverFieldsRecursive(ctx context.Context, typ *types.Named, defaultValue
 			}
 
 			fields = append(fields, FieldInfo{
-				Name:           tag.Name,
-				GoName:         v.Name(),
-				Typ:            t,
-				FlagMethodName: camelCase(t.String()),
-				DefaultValue:   defaultValue,
-				UsageString:    tag.Usage,
-				TestValue:      `"1"`,
-				TestStrategy:   JSON,
+				Name:              tag.Name,
+				GoName:            v.Name(),
+				Typ:               t,
+				FlagMethodName:    camelCase(t.String()),
+				DefaultValue:      defaultValue,
+				UsageString:       tag.Usage,
+				TestValue:         `"1"`,
+				TestStrategy:      JSON,
+				ShouldBindDefault: bindDefaultVar,
 			})
 		case *types.Named:
 			if _, isStruct := t.Underlying().(*types.Struct); !isStruct {
@@ -229,40 +232,42 @@ func discoverFieldsRecursive(ctx context.Context, typ *types.Named, defaultValue
 				logger.Infof(logger.WithIndent(ctx, indent), "Type is json unmarhslalable.")
 
 				fields = append(fields, FieldInfo{
-					Name:           tag.Name,
-					GoName:         v.Name(),
-					Typ:            types.Typ[types.String],
-					FlagMethodName: "String",
-					DefaultValue:   defaultValue,
-					UsageString:    tag.Usage,
-					TestValue:      testValue,
-					TestStrategy:   JSON,
+					Name:              tag.Name,
+					GoName:            v.Name(),
+					Typ:               types.Typ[types.String],
+					FlagMethodName:    "String",
+					DefaultValue:      defaultValue,
+					UsageString:       tag.Usage,
+					TestValue:         testValue,
+					TestStrategy:      JSON,
+					ShouldBindDefault: bindDefaultVar,
 				})
 			} else {
 				logger.Infof(ctx, "Traversing fields in type.")
 
-				nested, err := discoverFieldsRecursive(logger.WithIndent(ctx, indent), t, defaultValueAccessor, appendAccessors(fieldPath, v.Name()))
+				nested, err := discoverFieldsRecursive(logger.WithIndent(ctx, indent), t, defaultValueAccessor, appendAccessors(fieldPath, v.Name()), bindDefaultVar)
 				if err != nil {
 					return nil, err
 				}
 
 				for _, subField := range nested {
 					fields = append(fields, FieldInfo{
-						Name:           fmt.Sprintf("%v.%v", tag.Name, subField.Name),
-						GoName:         fmt.Sprintf("%v.%v", v.Name(), subField.GoName),
-						Typ:            subField.Typ,
-						FlagMethodName: subField.FlagMethodName,
-						DefaultValue:   subField.DefaultValue,
-						UsageString:    subField.UsageString,
-						TestValue:      subField.TestValue,
-						TestStrategy:   subField.TestStrategy,
+						Name:              fmt.Sprintf("%v.%v", tag.Name, subField.Name),
+						GoName:            fmt.Sprintf("%v.%v", v.Name(), subField.GoName),
+						Typ:               subField.Typ,
+						FlagMethodName:    subField.FlagMethodName,
+						DefaultValue:      subField.DefaultValue,
+						UsageString:       subField.UsageString,
+						TestValue:         subField.TestValue,
+						TestStrategy:      subField.TestStrategy,
+						ShouldBindDefault: bindDefaultVar,
 					})
 				}
 			}
 		case *types.Slice:
 			logger.Infof(ctx, "[%v] is of a slice type with default value [%v].", tag.Name, tag.DefaultValue)
 
-			f, err := buildFieldForSlice(logger.WithIndent(ctx, indent), t, tag.Name, v.Name(), tag.Usage, tag.DefaultValue)
+			f, err := buildFieldForSlice(logger.WithIndent(ctx, indent), t, tag.Name, v.Name(), tag.Usage, tag.DefaultValue, bindDefaultVar)
 			if err != nil {
 				return nil, err
 			}
@@ -271,7 +276,7 @@ func discoverFieldsRecursive(ctx context.Context, typ *types.Named, defaultValue
 		case *types.Array:
 			logger.Infof(ctx, "[%v] is of an array with default value [%v].", tag.Name, tag.DefaultValue)
 
-			f, err := buildFieldForSlice(logger.WithIndent(ctx, indent), t, tag.Name, v.Name(), tag.Usage, tag.DefaultValue)
+			f, err := buildFieldForSlice(logger.WithIndent(ctx, indent), t, tag.Name, v.Name(), tag.Usage, tag.DefaultValue, bindDefaultVar)
 			if err != nil {
 				return nil, err
 			}
@@ -288,7 +293,7 @@ func discoverFieldsRecursive(ctx context.Context, typ *types.Named, defaultValue
 // NewGenerator initializes a PFlagProviderGenerator for pflags files for targetTypeName struct under pkg. If pkg is not filled in,
 // it's assumed to be current package (which is expected to be the common use case when invoking pflags from
 // go:generate comments)
-func NewGenerator(pkg, targetTypeName, defaultVariableName string) (*PFlagProviderGenerator, error) {
+func NewGenerator(pkg, targetTypeName, defaultVariableName string, shouldBindDefaultVar bool) (*PFlagProviderGenerator, error) {
 	ctx := context.Background()
 	var err error
 
@@ -334,9 +339,10 @@ func NewGenerator(pkg, targetTypeName, defaultVariableName string) (*PFlagProvid
 	}
 
 	return &PFlagProviderGenerator{
-		st:         st,
-		pkg:        targetPackage,
-		defaultVar: defaultVar,
+		st:                   st,
+		pkg:                  targetPackage,
+		defaultVar:           defaultVar,
+		shouldBindDefaultVar: shouldBindDefaultVar,
 	}, nil
 }
 
@@ -369,7 +375,7 @@ func (g PFlagProviderGenerator) Generate(ctx context.Context) (PFlagProvider, er
 		defaultValueAccessor = g.defaultVar.Name()
 	}
 
-	fields, err := discoverFieldsRecursive(ctx, g.st, defaultValueAccessor, "")
+	fields, err := discoverFieldsRecursive(ctx, g.st, defaultValueAccessor, "", g.shouldBindDefaultVar)
 	if err != nil {
 		return PFlagProvider{}, err
 	}

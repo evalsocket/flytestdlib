@@ -58,7 +58,11 @@ func ({{ .Name }}) mustMarshalJSON(v json.Marshaler) string {
 func (cfg {{ .Name }}) GetPFlagSet(prefix string) *pflag.FlagSet {
 	cmdFlags := pflag.NewFlagSet("{{ .Name }}", pflag.ExitOnError)
 	{{- range .Fields }}
+	{{- if .ShouldBindDefault }}
+	cmdFlags.{{ .FlagMethodName }}Var(&{{ .DefaultValue }}, fmt.Sprintf("%v%v", prefix, "{{ .Name }}"), {{ .DefaultValue }}, {{ .UsageString }})
+	{{- else }}
 	cmdFlags.{{ .FlagMethodName }}(fmt.Sprintf("%v%v", prefix, "{{ .Name }}"), {{ .DefaultValue }}, {{ .UsageString }})
+	{{- end }}
 	{{- end }}
 	return cmdFlags
 }
